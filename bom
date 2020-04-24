@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+# Copyright (C) 2020 Alexis Lockwood, <alexislockwood@fastmail.com>
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option)
+# any later version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.
+#
+# You should have received a copy of the GNU General Public License along with
+# this program. If not, see <http://www.gnu.org/licenses/>.
+
+import argparse
+import collections
+import re
+import sys
+import os
+
+LineItem = collections.namedtuple("LineItem", ("qty", "refs", "bom"))
+
+def bom_lines(f):
+    """Yield all "BOM" lines from the file, as a pair (ref, bomline). ref may
+    be None."""
+
+    line1 = f.readline()
+
+    if line1 == "EESchema Schematic File Version 5\n":
+        return bom_lines_sch45(f)
+    elif line1 == "EESchema Schematic File Version 4\n":
+        return bom_lines_sch45(f)
+    else:
+        raise Exception(f"Cannot parse file {f.name} - format unknown")
+
+def bom_lines_sch45(f):
+    """Yield "BOM" lines from a recent "legacy" format (4 or 5)"""
+
+    field_re = re.compile(
+        r'^F \d+ "([^"]*)".*"BOM"$'
+    )
+
+    ref_re = re.compile(
+        r'^F 0 "([^"]*)" '
+    )
+
+    in_text = False
+    in_ignored_comp = False
+    in_comp = True
+    got_bom_line = False
+    ref = None
+
+    for line in f:
+        if not in_text and line.startswith("Text Notes"):
+            in_text = True
+            continue
+
+        if line == "$Comp\n":
+            in_comp = True
+            got_bom_line = False
+
+        if line == "$EndComp\n":
+            if not in_ignored_comp and not got_bom_line and not ref.startswith("#"):
+                print(
+                    f"WARNING: no BOM line for {ref}",
+                    file=sys.stderr,
+                )
+            in_ignored_comp = False
+            in_comp = False
+            ref = None
+            continue
+
+        if line.startswith("U ") and not line.startswith("U 1 "):
+            # For multiunits, only read the first unit
+            in_ignored_comp = True
+            continue
+
+        if in_ignored_comp:
+            continue
+
+        if line.startswith("F 0 "):
+            m = ref_re.match(line)
+            if m is not None:
+                ref = m.group(1)
+
+        if in_text:
+            # In a text object, these can be multi-line. Split them up.
+            for subline in line.split("\\n"):
+                if subline.startswith("BOM "):
+                    yield (ref, subline.strip())
+            in_text = False
+        else:
+            m = field_re.match(line.strip())
+            if m is not None:
+                got_bom_line = True
+                if m.group(1) != "NOBOM":
+                    yield (ref, "BOM " + m.group(1))
+
+def bom_items(lines, prefix):
+    """Yield individual BOM items from a set of lines, as a LineItem.
+
+    Formats accepted:
+        BOM item
+        BOM item, item, item...
+        BOM 4 item          # (any number)
+
+    All comments are discarded. Nonexistent (None) references are transformed
+    to "?", and `prefix` is prepended if it is not None.
+    """
+
+    with_count_re = re.compile(
+        r'^BOM +(\d+) +([^ ]+)'
+    )
+
+    without_count_re = re.compile(
+        r'^BOM +([^\d].*)'
+    )
+
+    for ref, line in lines:
+        line, _1, _2 = line.partition("#")
+        line = line.strip()
+
+        if ref is None:
+            ref = "?"
+        if prefix is not None:
+            ref = prefix + ref
+
+        m = with_count_re.match(line)
+        if m is not None:
+            count = int(m.group(1))
+            for i in range(count):
+                yield LineItem(1, [ref], m.group(2))
+
+        m = without_count_re.match(line)
+        if m is not None:
+            for item in m.group(1).split(","):
+                source, delim, pn = item.strip().partition(":")
+                if delim == ":":
+                    yield LineItem(1, [ref], source.strip() + ":" + pn.strip())
+                else:
+                    yield LineItem(1, [ref], item.strip())
+
+def format_ref_list(refs, collate):
+    """Taking a list of refs, format a more readable string."""
+
+    # Split each ref into a tuple of sortables, then sort them. Collate ranges.
+
+    single_number_re = re.compile(
+        r'([^\d]+)(\d+)$'
+    )
+
+    two_number_re = re.compile(
+        r'([^\d]+)(\d+)\.(\d+)$'
+    )
+
+    SingleNumber = collections.namedtuple("SingleNumber", ["kind", "num"])
+    TwoNumber = collections.namedtuple("TwoNumber", ["kind", "num1", "num"])
+    Generic = collections.namedtuple("Generic", ["wtf_even"])
+
+    refs_parsed = []
+
+    for ref in refs:
+        single_number_m = single_number_re.match(ref)
+        two_number_m = two_number_re.match(ref)
+
+        if single_number_m is not None:
+            refs_parsed.append(
+                SingleNumber(single_number_m.group(1), [int(single_number_m.group(2))])
+            )
+        elif two_number_m is not None:
+            refs_parsed.append(
+                TwoNumber(
+                    two_number_m.group(1),
+                    int(two_number_m.group(2)),
+                    [int(two_number_m.group(3))]
+                )
+            )
+        else:
+            refs_parsed.append(Generic(ref))
+
+    refs_parsed.sort()
+
+    if collate:
+        collates = refs_parsed[:1]
+
+        for ref in refs_parsed[1:]:
+            last = collates[-1]
+            if type(ref) is not type(last) or isinstance(ref, Generic):
+                collates.append(ref)
+                continue
+            if ref.num[0] == (last.num[-1] + 1):
+                last.num.extend(ref.num)
+            else:
+                collates.append(ref)
+    else:
+        collates = refs_parsed
+
+    out = []
+
+    for ref in collates:
+        if isinstance(ref, Generic):
+            out.append(ref.wtf_even)
+        elif isinstance(ref, (TwoNumber, SingleNumber)):
+            if len(ref.num) == 1:
+                num = ref.num[0]
+            else:
+                num = f"{ref.num[0]}-{ref.num[-1]}"
+
+            if isinstance(ref, TwoNumber):
+                out.append(f"{ref.kind}{ref.num1}.{num}")
+            else:
+                out.append(f"{ref.kind}{num}")
+        else:
+            raise Exception(r"¯\_(ツ)_/¯")
+
+    return ",".join(out)
+
+def main(argv):
+    p = argparse.ArgumentParser(description="Extract BOM from KiCad schematics")
+    p.add_argument("sch", metavar="SCH", nargs="+",
+        help="Files to extract, with optional colon-delimited ref prefix",
+    )
+    p.add_argument("--sort", "-s", action="store_true",
+        help="Sort items, first by BOM line, then by reference",
+    )
+    p.add_argument("--collate", "-c", action="store_true",
+        help="Combine same items onto lines. Implies --sort",
+    )
+    p.add_argument("--no-collate-refs", action="store_true",
+        help="List all references individually, even when lines are collated",
+    )
+    p.add_argument("--exclude-source", action="append", metavar="SRC", default=[],
+        help="Do not list SRC",
+    )
+    p.add_argument("--only-source", action="append", metavar="SRC", default=[],
+        help="Only list SRC (can be given multiple times",
+    )
+    p.add_argument("--dk", action="store_true",
+        help="Output in Digi-Key bulk add format. --only-source=DK recommended",
+    )
+
+    args = p.parse_args(argv[1:])
+
+    items = []
+
+    for i in args.sch:
+        if ":" in i:
+            prefix, delim, filename = i.partition(":")
+        else:
+            prefix = ""
+            filename = i
+
+        with open(filename) as f:
+            items.extend(bom_items(bom_lines(f), prefix))
+
+    if args.sort or args.collate:
+        items.sort(key = lambda item: (item.bom, item.refs))
+
+    if args.collate:
+        new_items = items[:1]
+
+        for item in items[1:]:
+            last = new_items[-1]
+            if item.bom == last.bom:
+                new_items[-1] = LineItem(
+                    last.qty + item.qty,
+                    last.refs + item.refs,
+                    last.bom
+                )
+            else:
+                new_items.append(item)
+
+        items[:] = new_items
+
+    for item in items:
+        source, delim, pn = item.bom.partition(":")
+        if delim != ":":
+            source = "?"
+            pn = item.bom
+        reflist = format_ref_list(item.refs, not args.no_collate_refs)
+
+        if args.only_source and source not in args.only_source:
+            continue
+
+        if source not in args.exclude_source:
+            if args.dk:
+                print(f"{item.qty},{pn}")
+            else:
+                print(f"{item.qty}\t{source}\t{pn}\t{reflist}")
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
