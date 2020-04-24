@@ -12,9 +12,13 @@ bulk-add lists), and requires BOM lines to be specified in certain ways:
   can be attached to one symbol, delimited by a comma (and optionally a space).
 
 - To list line items loose in the schematic, put them on a line by themselves
-  in a text object, formatted like `BOM qty item`, for example
-  `BOM 1 DK:CP-063AH-ND`. Currently, the quantity is mandatory, and line items
-  cannot be combined with commas (use separate lines).
+  in a text object, starting with `BOM ` and then formatted the same as a field
+  (e.g. `BOM DK:CP-063AH-ND`). As before, commas are supported.
+
+- To list loose line items with a quantity, put them on a line by themselves
+  in a text object, formatted like `BOM <qty> <item>`. In this case, only one
+  item specification per line is supported. For example, `BOM 4 DK:36-24438-ND`
+  orders four of `36-24438-ND` from Digi-Key.
 
 - In both fields and texts, `#` comments are supported.
 
