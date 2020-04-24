@@ -59,3 +59,9 @@ Digi-Key that I may have to manually source (consider piping into
 
 - `bom -sc --dk --only-source=DK` — dump a bulk-add list to order from
 Digi-Key
+
+## Missing BOM warnings
+
+All non-virtual symbols (references do not start with `#`) are expected to
+carry BOM lines; a warning is emitted for all that don't. To silence this
+for a symbol, set its BOM line to `NOBOM`.
