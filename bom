@@ -32,6 +32,8 @@ def bom_lines(f):
         return bom_lines_sch45(f)
     elif line1 == "EESchema Schematic File Version 4\n":
         return bom_lines_sch45(f)
+    elif line1.startswith("(kicad_sch "):
+        raise Exception("New-style .kicad_sch not supported yet")
     else:
         raise Exception(f"Cannot parse file {f.name} - format unknown")
 
